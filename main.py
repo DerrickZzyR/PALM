@@ -94,12 +94,12 @@ if __name__ == '__main__':
     parser.add_argument('--SSN_path', type=str, default='checkpoints/SSN.pth', help='SoftShapeNet 模型保存路径')
     parser.add_argument('--cls_path', type=str, default='checkpoints/cls_head.pth', help='分类模型保存路径')
     
-    # cMLP相关配置
+    # causal相关配置
     parser.add_argument('--lam', type=float, default=2e-3)
     parser.add_argument('--lam_ridge', type=float, default=1e-2)
     parser.add_argument('--penalty', type=str, default='H', choices=['H', 'GL', 'GSGL'])
 
-    # softshape相关配置
+    # tokenizer相关配置
     parser.add_argument('--emb_dim', type=int, default=256, help='SoftShapeNet embedding dimension')
     parser.add_argument('--depth', type=int, default=2, help='SoftShapeNet depth')
     parser.add_argument('--sparse_rate', type=float, default=0.60, help='SoftShapeNet sparse rate')
