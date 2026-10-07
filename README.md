@@ -37,6 +37,10 @@ Every ID must have a nonempty description. Rerun the same command to recover fai
 
 ## 4. Encode descriptions with LongCLIP
 
+**Prepare the LongCLIP checkpoint before running this step.** Download the official pretrained [`longclip-B.pt` weights](https://huggingface.co/BeichenZhang/LongCLIP-B/blob/main/longclip-B.pt). Save the file as `../checkpoints/longclip/longclip-B.pt` relative to the directory where you run the command below, or pass your local file path with `--checkpoint`. The encoding script requires an existing local checkpoint; it does not download the weights automatically.
+
+Prepare the [official Long-CLIP source](https://github.com/beichenzbc/Long-CLIP) at `../Long-CLIP`, or point `--longclip_root` to your clone, and follow its [installation instructions](https://github.com/beichenzbc/Long-CLIP#installation) for dependencies.
+
 This loads `src/LongClipTextEncoder.py` with the official repository and weights in the parent directory. It writes `[N,248,512]` float16 token features, boolean masks, IDs and metadata to `$TextPath`, ordered by `id_all.npy`. This entry point currently processes tail200 descriptions.
 
 ```powershell
