@@ -19,54 +19,49 @@ from matplotlib.figure import Figure
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
-if __package__:
-    from .config import TCCMModelConfig, DataConfig, SSEModelConfig, sse_sequence_length
-    from .data_provider.data import Ali_Dataset
-    from .src.engine import load_tccm, load_sse
-else:
-    from config import TCCMModelConfig, DataConfig, SSEModelConfig, sse_sequence_length
-    from data_provider.data import Ali_Dataset
-    from src.engine import load_tccm, load_sse
+from config import TCCMModelConfig, DataConfig, SSEModelConfig, sse_sequence_length
+from data_provider.data import Ali_Dataset
+from src.engine import load_tccm, load_sse
 
 
 DEFAULT_FEATURE_NAMES = ('baddllperrors', 'badtlperrors', 'portreceivererrors', 'recoverydiagnosticserrors', 'pcie_fatal_error', 'retire_page_dbe', 'ecc_v6_sram_uce', 'pcie_l0_recovery_count', 'temperature', 'retire_page_total', 'current_sm_utilization', 'pcie_ce_count', 'ecc_v6_dram_uce', 'retire_page_sbe', 'pcie_non_fatal_error')
 
-APP_ROOT = Path(__file__).resolve().parent
 # Full telemetry images with selected intervals and healthy causality prompts.
-SYSTEM_PROMPT = 'You are a senior GPU/PCIe telemetry diagnosis AIOps expert. You will receive a telemetry image with 15 time-series sub-plots, key_segments selected by a neural model, and healthy_baseline_causality learned only from healthy data. Treat healthy_baseline_causality as the normal-behavior baseline; it is not optional background. You must use it to identify causal deviations, including expected propagation disappearing or weakening, metrics changing without their normal causal triggers, abnormal co-movement inconsistent with healthy propagation, and persistence or escalation beyond normal self-resolving dynamics. If prompt hints and visible image evidence conflict, trust the image while still explaining the deviation relative to the healthy baseline.'
-USER_PROMPT = 'You are given:\n1) one telemetry image with actual values and healthy-baseline predicted values for 15 features,\n2) key_segments proposed by a neural model,\n3) healthy_baseline_causality learned only from healthy data.\n\nVisible features: {feature_list}\n\nPink-highlighted regions are anomalous intervals selected by the small model.\n\n{segment_info}{health_lib_info}Return strict JSON only:\n{{\n  "description": "<One cohesive paragraph in English, <=75 words. Mention up to 4 key time fragments in chronological order using explicit spans like t=[4-61]. Describe the main phenomenon in each fragment. Explicitly state at least one causal deviation relative to healthy_baseline_causality, such as expected propagation weakening, a metric changing without its normal trigger, abnormal co-movement, or persistence beyond healthy self-recovery. Conclude with the overall cross-feature propagation pattern that best explains the sample. Use only visible metric names and only healthy_baseline_causality-supported relations. No bullets, no headings, no extra JSON fields.>"\n}}\n'
+SYSTEM_PROMPT = """You are a senior GPU/PCIe telemetry diagnosis AIOps expert. \
+You will receive a telemetry image with 15 time-series sub-plots, \
+key_segments selected by a neural model, and healthy_baseline_causality \
+learned only from healthy data. \
+Treat healthy_baseline_causality as the normal-behavior baseline; \
+it is not optional background. \
+You must use it to identify causal deviations, including expected propagation \
+disappearing or weakening, metrics changing without their normal causal triggers, \
+abnormal co-movement inconsistent with healthy propagation, and persistence \
+or escalation beyond normal self-resolving dynamics. \
+If prompt hints and visible image evidence conflict, trust the image while \
+still explaining the deviation relative to the healthy baseline."""
 
+USER_PROMPT = """You are given:
+1) one telemetry image with actual values and healthy-baseline predicted values for 15 features,
+2) key_segments proposed by a neural model,
+3) healthy_baseline_causality learned only from healthy data.
 
-def resolve_device(requested: str) -> str:
-    if requested.startswith("cuda") and not torch.cuda.is_available():
-        raise RuntimeError(f"Requested device {requested!r}, but CUDA is unavailable. Use --device cpu.")
-    return requested
+Visible features: {feature_list}
 
+Pink-highlighted regions are anomalous intervals selected by the small model.
 
-def validate_args(args: argparse.Namespace, data_config: DataConfig, tccm_model_config: TCCMModelConfig) -> None:
-    if not args.splits or any(split not in {"train", "test", "all"} for split in args.splits):
-        raise ValueError("splits must contain only 'train', 'test', and/or 'all'")
-    if len(args.splits) > 1 and args.output_file is not None:
-        raise ValueError("--output_file requires exactly one split")
-    if args.num_shards < 1:
-        raise ValueError("--num_shards must be positive")
-    if not 0 <= args.shard_id < args.num_shards:
-        raise ValueError("--shard_id must satisfy 0 <= shard_id < num_shards")
-    if args.limit is not None and args.limit < 1:
-        raise ValueError("--limit must be positive")
-    if args.save_every < 1:
-        raise ValueError("--save_every must be positive")
-    if args.llm_retries < 1:
-        raise ValueError("--llm_retries must be positive")
-    if not np.isfinite(args.full_des_y_floor) or args.full_des_y_floor <= 0:
-        raise ValueError("--full_des_y_floor must be a positive finite number")
-    if data_config.time_steps <= tccm_model_config.lag:
-        raise ValueError("--time_steps must exceed --win_size")
-    if args.sse_checkpoint is None:
-        raise ValueError("--sse_checkpoint is required")
-    for path in (args.data_root, args.tccm_checkpoint, args.sse_checkpoint):
-        if not path.exists():
-            raise FileNotFoundError(path)
+{segment_info}{health_lib_info}Return strict JSON only:
+{{
+  "description": "<One cohesive paragraph in English, <=75 words. \
+Mention up to 4 key time fragments in chronological order using explicit spans like t=[4-61]. \
+Describe the main phenomenon in each fragment. \
+Explicitly state at least one causal deviation relative to healthy_baseline_causality, \
+such as expected propagation weakening, a metric changing without its normal trigger, \
+abnormal co-movement, or persistence beyond healthy self-recovery. \
+Conclude with the overall cross-feature propagation pattern that best explains the sample. \
+Use only visible metric names and only healthy_baseline_causality-supported relations. \
+No bullets, no headings, no extra JSON fields.>"
+}}
+"""
 
 
 def load_feature_names(path: Path | None, count: int) -> list[str]:
@@ -458,7 +453,7 @@ def output_path_for_split(args: argparse.Namespace, split: str) -> Path:
 
 
 def image_output_directory(args: argparse.Namespace, split: str) -> Path:
-    base = args.save_images or APP_ROOT / "outputs" / "description_full_images"
+    base = args.save_images or Path("outputs/description_full_images")
     dataset_name = args.data_root.resolve().name
     model_tag = normalize_description_model_tag(args.description_model_tag)
     return base / dataset_name / (model_tag or "untagged") / split
@@ -546,8 +541,7 @@ def main(args: argparse.Namespace) -> None:
     tccm_model_config = TCCMModelConfig(lag=args.win_size)
     sse_model_config = SSEModelConfig(embedding_dim=args.embedding_dim, shape_size=args.shape_size, shape_stride=args.shape_stride, sparse_rate=args.sparse_rate, num_experts=args.num_experts, alpha=args.alpha, attention_hidden_dim=args.attention_hidden_dim, dropout=args.dropout, selector_gate_strength=args.selector_gate_strength, use_revin=bool(args.use_revin), affine=bool(args.affine), subtract_last=bool(args.subtract_last))
     args.description_model_tag = resolve_description_model_tag(args.description_model_tag, args.llm_model)
-    validate_args(args, data_config, tccm_model_config)
-    device = resolve_device(args.device)
+    device = args.device
     feature_names = load_feature_names(args.feature_names_json, data_config.num_channels)
     causality_summary = load_causality_summary(args.health_prior_path, feature_names)
     print(f"Description run: tail={data_config.time_steps} | model_tag={args.description_model_tag or 'untagged'} | device={device}")
@@ -573,7 +567,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--output_root', type=Path, default=None, help='Description JSON output root; defaults to the dataset root')
     parser.add_argument('--output_file', type=Path, default=None, help='Explicit output file when generating one split')
-    parser.add_argument('--health_prior_path', type=Path, default=APP_ROOT / 'healthy_causal_relations.json', help='Healthy causality prior JSON path')
+    parser.add_argument('--health_prior_path', type=Path, default='healthy_causal_relations.json', help='Healthy causality prior JSON path')
     parser.add_argument('--save_images', type=Path, default='outputs/pictures', help='Root directory for full telemetry images')
     parser.add_argument('--save_full_des_images', type=int, choices=[0, 1], default=1, help='Save full telemetry images')
     parser.add_argument('--full_des_y_floor', type=float, default=5.0, help='Minimum half-range of each feature Y axis')
@@ -593,9 +587,9 @@ if __name__ == "__main__":
     parser.add_argument('--llm_base_url', type=str, default='https://xxx', help='OpenAI-compatible API base URL')
     parser.add_argument('--llm_retries', type=int, default=3, help='Maximum API request attempts')
 
-    # Checkpoint
-    parser.add_argument('--tccm_checkpoint', type=Path, default=APP_ROOT / 'checkpoints/tccm_top_tail200_seed42.pth', help='TCCM checkpoint path')
-    parser.add_argument('--sse_checkpoint', type=Path, default=None, help='SSE checkpoint path (required)')
+    # Checkpoint paths
+    parser.add_argument('--tccm_checkpoint', type=Path, default='checkpoints/tccm_top_tail200_seed42.pth', help='TCCM checkpoint path')
+    parser.add_argument('--sse_checkpoint', type=Path, default='checkpoints/sse_top_tail200.pth', help='SSE checkpoint path')
 
     # Model configuration
     parser.add_argument('--win_size', type=int, default=6, help='TCCM lag window size')
