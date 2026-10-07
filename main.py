@@ -1,145 +1,319 @@
-import os
-import torch
+import argparse
 import random
-import warnings
+from pathlib import Path
+
 import numpy as np
-from exp.calmpro_trainer import calmproTrainer
-from data_provider.processors import AliPreprocessor
+import torch
+from config import CRPModelConfig,CRPTrainConfig,TCCMModelConfig,TCCMTrainConfig,DataConfig,SSEModelConfig,SSETrainConfig
+from src.engine import test_crp, test_sse, train_crp, train_tccm, train_sse
 
-warnings.filterwarnings('ignore')
 
-model_trainer_dict = {
-    'calmpro': calmproTrainer
-}
-
-data_process_dict = {
-    'ali': AliPreprocessor
-}
-
-def setup_reproducibility(seed=42):
-    os.environ['PYTHONHASHSEED'] = str(seed)
+def setup_reproducibility(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser()
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the single entry-point parser, grouped by model and function."""
+    parser = argparse.ArgumentParser(
+        description="PALM training, evaluation, and evidence-chain entry point",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter, allow_abbrev=False,
+    )
 
     # ==========================
-    # 核心环境与模式配置 (Core)
+    # Core runtime and actions
     # ==========================
-    parser.add_argument('--device', type=str, default='cuda', help='运算设备 (cuda/cpu)')
-    parser.add_argument('--phase', type=str, default='pretrain', choices=['pretrain', 'train', 'test', 'all'], help='运行阶段')
-    parser.add_argument('--train_ssn', type=int, default=0, help='是否训练SSN (1: 训练, 0: 不训练)')
-    parser.add_argument('--train_cls', type=int, default=0, help='是否训练patch分类头 (1: 训练, 0: 不训练)')
-    parser.add_argument('--test_ssn', type=int, default=0, help='是否测试SSN (1: 测试, 0: 不测试)')
-    parser.add_argument('--test_cls', type=int, default=0, help='是否测试patch分类头 (1: 测试, 0: 不测试)')
-    parser.add_argument('--model', type=str, default='calmpro', help='选择训练哪个模型')
-    parser.add_argument('--seed', type=int, default=42, help='随机种子 (虽然代码里写死在setup func, 但保留参数是个好习惯)')
-    parser.add_argument('--do_stasca', action='store_true', help='是否对数据做标准化，与ReVin配套使用，如果该项为false，则ReVin要为true，反之该项为true，ReVin要为false')
-
-    # ==========================
-    # 数据集配置 (Data)
-    # ==========================
-    parser.add_argument('--data', type=str, default='d1', help='数据集名称 (对应 processors key)')
-    parser.add_argument('--raw_root_path', type=str, default='data/raw_data/d1', help='原始数据根目录')
-    parser.add_argument('--sta_root_path', type=str, default='data/sta_data/d1', help='处理后数据保存目录')
-    parser.add_argument('--data_path', type=str, nargs='+', default=[], help='(可选) 指定读取的具体文件名列表')
-    
-    # 数据预处理参数
-    parser.add_argument('--win_size', type=int, default=6, help='时间窗口大小 (T)')
-    parser.add_argument('--test_size', type=float, default=0.3, help='测试集划分比例')
-    parser.add_argument('--num_channels', type=int, default=15, help='输入特征维度')
-    parser.add_argument('--num_class', type=int, default=2, help='分类数')
-    parser.add_argument('--gene_des', type=int, default=0, help='是否生成描述性统计特征 (1: 生成, 0: 不生成)')
-    parser.add_argument('--llm_model', type=str, default='gpt-3.5-turbo', help='用于生成描述性统计特征的LLM模型名称')
-    parser.add_argument('--llm_max_tokens', type=int, default=100, help='用于生成描述性统计特征的LLM模型最大输出token数')
-    parser.add_argument('--llm_temperature', type=float, default=0.7, help='用于生成描述性统计特征的LLM模型温度参数')
-    parser.add_argument('--llm_api_key', type=str, default='', help='用于调用LLM的API Key')
-    parser.add_argument('--llm_base_url', type=str, default='', help='用于调用LLM的Base URL')
-    parser.add_argument('--gene_splits', nargs='+', default=['train', 'test'], choices=['train', 'test'], help='指定为哪些数据集生成描述性统计特征 (如 --gene_splits train test)')
-
+    core = parser.add_argument_group("Core runtime and actions")
+    core.add_argument("--device",default="cuda")
+    core.add_argument("--seed",type=int,default=42)
+    core.add_argument("--batch_size",type=int,default=32)
+    core.add_argument("--train_tccm",type=int,choices=[0, 1],default=0)
+    core.add_argument("--train_sse",type=int,choices=[0, 1],default=1)
+    core.add_argument("--train_crp",type=int,choices=[0, 1],default=0)
+    core.add_argument("--test_sse",type=int,choices=[0, 1],default=0)
+    core.add_argument("--test_crp",type=int,choices=[0, 1],default=0)
 
     # ==========================
-    # 模型训练超参数 (Training)
+    # Data and evaluation
     # ==========================
-    parser.add_argument('--epochs', type=int, default=10, help='训练轮数')
-    parser.add_argument('--batch_size', type=int, default=32, help='通用批次大小')
-    parser.add_argument('--backbone_batch_size', type=int, default=32, help='骨干批次大小')
-    parser.add_argument('--ssn_batch_size', type=int, default=32, help='SSN批次大小')
-    parser.add_argument('--cls_batch_size', type=int, default=32, help='分类头批次大小')
-    parser.add_argument('--lr', type=float, default=5e-2, help='学习率')
-    parser.add_argument('--lr_ssn', type=float, default=1e-4, help='学习率')
-    parser.add_argument('--lr_cls', type=float, default=1e-4, help='学习率')
-    parser.add_argument('--weight_decay', type=float, default=0.0, help='weight decay')
-    parser.add_argument('--dropout', type=float, default=0.2, help='Dropout 概率')
-    parser.add_argument('--early_stopping', action='store_true', help='启用早停策略')
-    parser.add_argument('--patience', type=int, default=20, help='早停容忍的无提升轮数')
-    parser.add_argument('--warmup_start_ratio', type=float, default=0.1, help='学习率预热起始比例')
-    parser.add_argument('--plateau_patience', type=int, default=10, help='学习率调整中plateau策略的patience参数')
-    parser.add_argument('--lr_decay_factor', type=float, default=0.5, help='学习率衰减因子 (用于plateau策略)')
-    parser.add_argument('--min_lr', type=float, default=1e-6, help='学习率下限 (用于plateau策略)')
-    parser.add_argument('--T_0', type=int, default=10, help='Cosine Annealing周期长度 (用于cosanneal策略)')
-    parser.add_argument('--T_mult', type=int, default=2, help='Cosine Annealing周期倍增因子 (用于cosanneal策略)')
+    data = parser.add_argument_group("Data and evaluation")
+    data.add_argument("--data_path",type=Path,default="")
+    data.add_argument("--text_path",type=Path,default="")
+    data.add_argument("--multi_port_path",type=Path,default="")
+    data.add_argument("--splits",nargs="+",choices=["train", "test"],default=["train", "test"])
+    data.add_argument("--threshold", type=float, default=0.5)
+    data.add_argument("--time_steps", type=int, default=200)
+    data.add_argument("--num_channels", type=int, default=15)
+    data.add_argument("--num_classes", type=int, default=2)
 
     # ==========================
-    # 检查点路径 (Checkpoints)
+    # TCCM architecture and optimization
     # ==========================
-    parser.add_argument('--ckpt_path', type=str, default='checkpoints/TranAD.pth', help='通用模型保存路径')
-    parser.add_argument('--SSN_path', type=str, default='checkpoints/SSN.pth', help='SoftShapeNet 模型保存路径')
-    parser.add_argument('--cls_path', type=str, default='checkpoints/cls_head.pth', help='分类模型保存路径')
-    
-    # causal相关配置
-    parser.add_argument('--lam', type=float, default=2e-3)
-    parser.add_argument('--lam_ridge', type=float, default=1e-2)
-    parser.add_argument('--penalty', type=str, default='H', choices=['H', 'GL', 'GSGL'])
+    tccm = parser.add_argument_group("TCCM: Topology-Constrained Causal Model")
+    tccm.add_argument("--win_size", type=int, default=6)
+    tccm.add_argument("--tccm_epochs", type=int, default=500)
+    tccm.add_argument("--tccm_learning_rate",type=float,default=5e-2,)
+    tccm.add_argument("--group_penalty", type=float, default=0.05)
+    tccm.add_argument("--ridge_penalty", type=float, default=1e-2)
+    tccm.add_argument("--penalty", choices=["H", "GL", "GSGL"], default="GSGL")
+    tccm.add_argument("--use_topology_mask",type=int,choices=[0, 1],default=1)
+    tccm.add_argument("--topology_mask_path",type=Path,default=Path("topology_mask_ali.json"))
+    tccm.add_argument("--topology_lam", type=float, default=1e-4)
 
-    # tokenizer相关配置
-    parser.add_argument('--emb_dim', type=int, default=256, help='SoftShapeNet embedding dimension')
-    parser.add_argument('--depth', type=int, default=2, help='SoftShapeNet depth')
-    parser.add_argument('--sparse_rate', type=float, default=0.60, help='SoftShapeNet sparse rate')
-    parser.add_argument('--shape_size', type=int, default=5, help='SoftShapeNet shape size')
-    parser.add_argument('--shape_use_ratio', type=int, default=0, help='SoftShapeNet shape use ratio')
-    parser.add_argument('--shape_ratio', type=float, default=0.0, help='SoftShapeNet shape ratio')
-    parser.add_argument('--shape_stride', type=int, default=2, help='SoftShapeNet shape stride')
-    parser.add_argument('--moe_num_experts', type=int, default=3, help='SoftShapeNet Mixture of Experts数量')
-    parser.add_argument('--warm_up_epoch', type=int, default=100, help='SoftShapeNet 预热轮数')
-    parser.add_argument('--moeloss_rate', type=float, default=0.001, help='SoftShapeNet MoE损失权重')
-    parser.add_argument('--RevIN', type=int, default=1, help='是否使用RevIN (1: 使用, 0: 不使用)')
-    parser.add_argument('--process', type=str, default='normal', help='数据处理方式 (normal/shape)')
-    parser.add_argument('--alpha', type=float, default=0.7, help='SoftShapeNet alpha参数')
-    parser.add_argument('--attention_head_dim', type=int, default=8, help='SoftShapeNet attention head dimension')
-    parser.add_argument('--raw', type=int, default=1, help='SoftShapeNet raw parameter')
-    parser.add_argument('--verbose', type=int, default=1, help='SoftShapeNet verbose parameter')
-    parser.add_argument('--affine', type=int, default=0)
-    parser.add_argument('--subtract_last', type=int, default=0)
+    # ==========================
+    # SSE
+    # ==========================
+    sse = parser.add_argument_group("SSE: StateSignatureExtractor")
+    sse.add_argument("--embedding_dim", type=int, default=128)
+    sse.add_argument("--shape_size", type=int, default=4)
+    sse.add_argument("--shape_stride", type=int, default=2)
+    sse.add_argument("--sparse_rate", type=float, default=0.5)
+    sse.add_argument("--num_experts", type=int, default=4)
+    sse.add_argument("--alpha", type=float, default=0.7)
+    sse.add_argument("--attention_hidden_dim",type=int,default=8)
+    sse.add_argument("--sse_dropout", type=float, default=0.15)
+    sse.add_argument("--selector_gate_strength",type=float,default=0.0,)
+    sse.add_argument("--sse_revin", type=int, choices=[0, 1], default=1)
+    sse.add_argument("--sse_affine", type=int, choices=[0, 1], default=0)
+    sse.add_argument("--sse_subtract_last", type=int, choices=[0, 1], default=0)
+    sse.add_argument("--sse_epochs", type=int, default=100)
+    sse.add_argument("--warmup_epochs", type=int, default=40)
+    sse.add_argument("--sse_learning_rate",type=float,default=1e-4)
+    sse.add_argument("--sse_weight_decay", type=float, default=0.0)
+    sse.add_argument("--moe_loss_weight", type=float, default=1e-3)
+    sse.add_argument("--selector_loss_weight",type=float,default=0.1)
+    sse.add_argument("--warmup_start_ratio",type=float,default=0.1)
+    sse.add_argument("--plateau_factor", type=float, default=0.5)
+    sse.add_argument("--plateau_patience",type=int,default=10)
+    sse.add_argument("--sse_minimum_learning_rate",type=float,default=1e-6)
+    sse.add_argument("--sse_gradient_clip_norm",type=float,default=1.0)
 
-    args = parser.parse_args()
+    # ==========================
+    # Co-Refinement Predictor
+    # ==========================
+    crp = parser.add_argument_group("CRP: Co-Refinement Predictor")
+    crp.add_argument("--text_feature_tag", default="longclip_b_ctx248_trunc_model_gpt_5")
+    crp.add_argument("--crp_hidden_dim", type=int, default=512)
+    crp.add_argument("--crp_num_heads", type=int, default=4)
+    crp.add_argument("--crp_dropout", type=float, default=0.3)
+    crp.add_argument("--crp_multi_ports", type=int, default=8)
+    crp.add_argument("--crp_multi_input_channels",type=int,default=15)
+    crp.add_argument("--crp_multi_hidden_dim",type=int,default=64)
+    crp.add_argument("--crp_multi_context_dim",type=int,default=128)
+    crp.add_argument("--crp_multi_dilations",type=int,nargs="+",default=[1, 2, 4, 8, 16, 32])
+    crp.add_argument("--crp_multi_dropout", type=float, default=0.2)
+    crp.add_argument("--crp_multi_revin_affine",type=int,choices=[0, 1],default=1)
+    crp.add_argument("--crp_multi_revin_eps",type=float,default=1e-5)
+    crp.add_argument("--crp_epochs", type=int, default=50)
+    crp.add_argument("--crp_learning_rate",type=float,default=1e-4)
+    crp.add_argument("--crp_weight_decay", type=float, default=0.0)
+    crp.add_argument("--crp_restart_period", type=int, default=10)
+    crp.add_argument("--crp_restart_multiplier",type=int,default=2)
+    crp.add_argument("--crp_minimum_learning_rate",type=float,default=1e-6)
+    crp.add_argument("--crp_gradient_clip_norm",type=float,default=1.0)
 
-    args.ckpt_path = os.path.join('checkpoints', f'{args.model}_win_{args.win_size}_lr{args.lr}_batchsize{args.backbone_batch_size}.pth')
-    args.SSN_path = os.path.join('checkpoints', f'softshape_embdim{args.emb_dim}_affine{args.affine}_a{args.alpha}_shsi{args.shape_size}_shst{args.shape_stride}_spra{args.sparse_rate}_attehdim{args.attention_head_dim}_lr{args.lr_ssn}_batchsize{args.ssn_batch_size}.pth')
-    args.cls_path = os.path.join('checkpoints', f'{args.model}_cls_head_ssnattehdim{args.attention_head_dim}_ssnlr{args.lr_ssn}_ssnbatchsize{args.ssn_batch_size}_lr{args.lr_cls}_batchsize{args.cls_batch_size}.pth')
-    
-    os.makedirs('checkpoints', exist_ok=True)
-    os.makedirs('dataset', exist_ok=True)
+    # ==========================
+    # Evidence Chain Generation
+    # ==========================
+    evidence = parser.add_argument_group("Evidence Chain Generation")
+    evidence.add_argument("--gene_des",type=int,choices=[0, 1],default=0)
+    evidence.add_argument("--llm_model", default="gpt-5")
+    evidence.add_argument("--llm_base_url", default=None)
+    evidence.add_argument("--llm_api_key",default=None)
+    evidence.add_argument("--llm_temperature", type=float, default=0.1)
+    evidence.add_argument("--llm_max_tokens", type=int, default=400)
+    evidence.add_argument("--llm_retries", type=int, default=3)
+    evidence.add_argument("--evidence_context_points",type=int,default=8,)
+    evidence.add_argument("--evidence_max_tiles", type=int, default=4)
+    evidence.add_argument("--evidence_merge_gap", type=int, default=2)
+    evidence.add_argument("--evidence_min_interval_points",type=int,default=3,)
+    evidence.add_argument("--evidence_y_floor", type=float, default=5.0)
+    evidence.add_argument("--feature_names_json",type=Path,default=None,)
+    evidence.add_argument("--health_prior_path",type=Path,default=Path("healthy_causal_relations.json"))
+    evidence.add_argument("--evidence_output",type=Path,default=Path("dataset/evidence_chain.json"))
+    evidence.add_argument("--description_model_tag",default="")
+    evidence.add_argument("--evidence_save_every", type=int, default=50)
+    evidence.add_argument("--gene_splits",nargs="+",choices=["train", "test"],default=["train", "test"],)
 
-    setup_reproducibility(seed=args.seed)
+    # ==========================
+    # Checkpoints
+    # ==========================
+    checkpoints = parser.add_argument_group("Checkpoints")
+    checkpoints.add_argument("--tccm_checkpoint", type=Path, default="")
+    checkpoints.add_argument("--sse_checkpoint", type=Path, default="")
+    checkpoints.add_argument("--crp_checkpoint",type=Path,default="")
+    return parser
 
-    if not os.path.exists(os.path.join(args.sta_root_path, 'X_train.npy')):
-        print('数据还未处理, 正在处理...')
-        # 获取类并实例化
-        ProcessorClass = data_process_dict[args.data]
-        processor = ProcessorClass(args)
-        
-        # 运行
-        processor.run()
-    else:
-        print('数据已存在, 无须处理直接读取训练')
 
-    model_trainer = model_trainer_dict[args.model](args)
-    model_trainer.run()
+def data_config_from_args(args: argparse.Namespace) -> DataConfig:
+    return DataConfig(time_steps=args.time_steps,num_channels=args.num_channels,num_classes=args.num_classes)
+
+
+def tccm_model_config_from_args(args: argparse.Namespace,) -> TCCMModelConfig:
+    return TCCMModelConfig(lag=args.win_size)
+
+
+def sse_model_config_from_args(args: argparse.Namespace) -> SSEModelConfig:
+    return SSEModelConfig(
+        embedding_dim=args.embedding_dim,
+        shape_size=args.shape_size,
+        shape_stride=args.shape_stride,
+        sparse_rate=args.sparse_rate,
+        num_experts=args.num_experts,
+        alpha=args.alpha,
+        attention_hidden_dim=args.attention_hidden_dim,
+        dropout=args.sse_dropout,
+        selector_gate_strength=args.selector_gate_strength,
+        use_revin=bool(args.sse_revin),
+        affine=bool(args.sse_affine),
+        subtract_last=bool(args.sse_subtract_last),
+    )
+
+
+def crp_model_config_from_args(args: argparse.Namespace) -> CRPModelConfig:
+    return CRPModelConfig(
+        hidden_dim=args.crp_hidden_dim,
+        num_heads=args.crp_num_heads,
+        dropout=args.crp_dropout,
+        multi_ports=args.crp_multi_ports,
+        multi_input_channels=args.crp_multi_input_channels,
+        multi_hidden_dim=args.crp_multi_hidden_dim,
+        multi_context_dim=args.crp_multi_context_dim,
+        multi_dilations=tuple(args.crp_multi_dilations),
+        multi_dropout=args.crp_multi_dropout,
+        multi_revin_affine=bool(args.crp_multi_revin_affine),
+        multi_revin_eps=args.crp_multi_revin_eps,
+    )
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = build_parser().parse_args(argv)
+    setup_reproducibility(args.seed)
+    data_config = data_config_from_args(args)
+    tccm_model_config = tccm_model_config_from_args(args)
+
+    if args.train_tccm == 1:
+        tccm_train_config = TCCMTrainConfig(
+            epochs=args.tccm_epochs,
+            learning_rate=args.tccm_learning_rate,
+            group_penalty=args.group_penalty,
+            ridge_penalty=args.ridge_penalty,
+            penalty=args.penalty,
+            use_topology_mask=bool(args.use_topology_mask),
+            topology_mask_path=args.topology_mask_path,
+            topology_lam=args.topology_lam,
+        )
+        train_tccm(
+            data_config=data_config,
+            tccm_model_config=tccm_model_config,
+            tccm_train_config=tccm_train_config,
+            data_root=args.data_path,
+            output_checkpoint=args.tccm_checkpoint,
+            batch_size=args.batch_size,
+            device=args.device,
+            seed=args.seed,
+        )
+        return
+
+    if args.train_sse == 1:
+        sse_model_config = sse_model_config_from_args(args)
+        sse_train_config = SSETrainConfig(
+            epochs=args.sse_epochs,
+            warmup_epochs=args.warmup_epochs,
+            learning_rate=args.sse_learning_rate,
+            weight_decay=args.sse_weight_decay,
+            moe_loss_weight=args.moe_loss_weight,
+            selector_loss_weight=args.selector_loss_weight,
+            warmup_start_ratio=args.warmup_start_ratio,
+            plateau_factor=args.plateau_factor,
+            plateau_patience=args.plateau_patience,
+            minimum_learning_rate=args.sse_minimum_learning_rate,
+            gradient_clip_norm=args.sse_gradient_clip_norm,
+        )
+        train_sse(
+            data_config=data_config,
+            tccm_model_config=tccm_model_config,
+            sse_model_config=sse_model_config,
+            sse_train_config=sse_train_config,
+            data_root=args.data_path,
+            tccm_checkpoint=args.tccm_checkpoint,
+            output_checkpoint=args.sse_checkpoint,
+            batch_size=args.batch_size,
+            device=args.device,
+            seed=args.seed,
+        )
+        return
+
+    if args.test_sse == 1:
+        sse_model_config = sse_model_config_from_args(args)
+        test_sse(
+            data_config=data_config,
+            tccm_model_config=tccm_model_config,
+            sse_model_config=sse_model_config,
+            data_root=args.data_path,
+            tccm_checkpoint=args.tccm_checkpoint,
+            sse_checkpoint=args.sse_checkpoint,
+            batch_size=args.batch_size,
+            device=args.device,
+            threshold=args.threshold,
+        )
+        return
+
+    if args.train_crp == 1:
+        sse_model_config = sse_model_config_from_args(args)
+        crp_model_config = crp_model_config_from_args(args)
+        crp_train_config = CRPTrainConfig(
+            epochs=args.crp_epochs,
+            learning_rate=args.crp_learning_rate,
+            weight_decay=args.crp_weight_decay,
+            restart_period=args.crp_restart_period,
+            restart_multiplier=args.crp_restart_multiplier,
+            minimum_learning_rate=args.crp_minimum_learning_rate,
+            gradient_clip_norm=args.crp_gradient_clip_norm,
+        )
+        train_crp(
+            data_config=data_config,
+            tccm_model_config=tccm_model_config,
+            sse_model_config=sse_model_config,
+            crp_model_config=crp_model_config,
+            crp_train_config=crp_train_config,
+            data_root=args.data_path,
+            tccm_checkpoint=args.tccm_checkpoint,
+            sse_checkpoint=args.sse_checkpoint,
+            crp_checkpoint=args.crp_checkpoint,
+            text_root=args.text_path,
+            text_feature_tag=args.text_feature_tag,
+            batch_size=args.batch_size,
+            device=args.device,
+            multi_port_root=args.multi_port_path,
+        )
+        return
+
+    if args.test_crp == 1:
+        sse_model_config = sse_model_config_from_args(args)
+        crp_model_config = crp_model_config_from_args(args)
+        test_crp(
+            data_config=data_config,
+            tccm_model_config=tccm_model_config,
+            sse_model_config=sse_model_config,
+            crp_model_config=crp_model_config,
+            data_root=args.data_path,
+            tccm_checkpoint=args.tccm_checkpoint,
+            sse_checkpoint=args.sse_checkpoint,
+            crp_checkpoint=args.crp_checkpoint,
+            text_root=args.text_path,
+            text_feature_tag=args.text_feature_tag,
+            batch_size=args.batch_size,
+            device=args.device,
+            threshold=args.threshold,
+            multi_port_root=args.multi_port_path,
+        )
+        return
+
+
+if __name__ == "__main__":
+    main()

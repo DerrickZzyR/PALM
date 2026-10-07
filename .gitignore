@@ -1,53 +1,20 @@
-# 数据目录
-data/
-data/*
-**/data/
-**/data/*
-dataset/
-dataset/*
-**/dataset/
-**/dataset/*
-
-# 模型检查点目录
-checkpoints/
-checkpoints/*
-**/checkpoints/
-**/checkpoints/*
-
-# 图片目录
-pics/
-pics/*
-**/pics/
-**/pics/*
-
-# Python 缓存
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.ipynb_checkpoints/
-.pytest_cache/
-
-# 环境配置
-.env
-.venv
-env/
-venv/
-ENV/
-
-# IDE 配置
 .vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
+__pycache__/
+*.py[cod]
 
-# 日志文件
-*.log
-logs/
-
+data/
+checkpoints/
 outputs/
-outputs/*
-**/outputs/
-**/outputs/*
+experiments/
+baselines/
+analysis/
+other/
+
+*.pth
+*.pt
+*.npy
+*.npz
+*.csv
+*.log
+healthy_causal_relations.json
+topology_mask_ali3.json
